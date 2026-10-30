@@ -4,5 +4,30 @@ __pycache__/
 venv/
 .env
 .env.*
+*.env
 !.env.example
 .DS_Store
+
+# Local credentials and private keys
+.secrets/
+secrets/
+credentials.json
+credentials.local.json
+secrets.json
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ecdsa
+id_ed25519
+
+# Browser captures can contain cookies, tokens, headers, and private page data
+sessions/
+playwright/.auth/
+storage_state.json
+storage-state.json
+*.har
+
+# Runtime logs may contain private data
+*.log
