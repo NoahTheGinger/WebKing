@@ -13,7 +13,7 @@ An MCP-powered laboratory for reverse-engineering modern web applications. WebKi
 
 ## Features
 
-- 🌐 **Headless capture** — Playwright-based sessions with optional recipes, cookies, headers, and selective artifact capture
+- 🌐 **Headless capture** — Playwright-based sessions with optional cookies, headers, and selective artifact capture (a recipe hook is in place for scripted flows, but recipes are not implemented yet)
 - 📁 **Session vault** — Structured artifact tree (`sessions/<id>/`) plus manifest metadata for quick discovery
 - 🔍 **Network insights** — Filter and aggregate captured requests/responses (hosts, methods, payload previews)
 - 🧠 **Summaries & stubs** — Heuristic session summaries and Tampermonkey skeletons seeded with captured insights
@@ -23,7 +23,7 @@ An MCP-powered laboratory for reverse-engineering modern web applications. WebKi
 
 ## Getting Started
 
-1. **Install dependencies**
+1. **Install dependencies** (Python 3.11+)
 
    ```bash
    pip install .
@@ -36,15 +36,7 @@ An MCP-powered laboratory for reverse-engineering modern web applications. WebKi
    python webking_mcp.py
    ```
 
-   Or point the evaluation harness at it:
-
-   ```bash
-   python scripts/evaluation.py \
-     -t stdio \
-     -c python \
-     -a webking_mcp.py \
-     my_eval.xml
-   ```
+   To use it from an MCP client such as Claude Desktop or Claude Code, register it as a stdio server that runs `python /path/to/WebKing/webking_mcp.py`. Captured sessions are written to a `sessions/` directory relative to the server's working directory.
 
 3. **Call tools**
 
@@ -73,11 +65,19 @@ sessions/                     # Populated at runtime with captured artifacts
 
 ## Extending WebKing
 
-- **Recipes**: Implement scripted flows inside `SessionManager._run_recipe` (e.g., login sequences)
+- **Recipes**: Implement scripted flows inside `_run_recipe` in `webking/browser/session_manager.py` (e.g., login sequences)
 - **Analyzers**: Add modules under `webking/analyzers/` for bundle dissection, GraphQL schema inference, etc.
 - **Outputs**: Introduce additional tools for exporting results (e.g., to Markdown reports or obsidian vaults)
 
 Pull requests, forks, and wild experiments welcome.
+
+---
+
+## Responsible use and captured data
+
+- Only capture sites you own or are authorized to test, and respect their terms of service and rate limits.
+- Captures include request headers, cookies, and storage state, which can contain session tokens and credentials. Treat `sessions/` as sensitive: keep it out of version control (it is gitignored here) and don't share it.
+- The artifact tools only read files inside `sessions/<id>/`; session and file names that try to escape that directory are rejected.
 
 ---
 

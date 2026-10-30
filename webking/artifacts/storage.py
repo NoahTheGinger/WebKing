@@ -138,13 +138,27 @@ def find_manifests(base_dir: Path | None = None) -> list[SessionManifest]:
     return manifests
 
 
+def _resolve_within(base: Path, name: str) -> Path:
+    """Join ``name`` onto ``base``, rejecting anything that escapes ``base``."""
+    base = base.resolve()
+    candidate = (base / name).resolve()
+    if candidate == base or not candidate.is_relative_to(base):
+        raise ValueError(f"Invalid path '{name}'.")
+    return candidate
+
+
 def resolve_session_path(session_id: str, base_dir: Path | None = None) -> Path:
-    """Resolve a session directory, raising if missing."""
+    """Resolve a session directory, raising if missing or outside the sessions directory."""
     base_dir = base_dir or DEFAULT_SESSIONS_DIR
-    session_dir = base_dir / session_id
-    if not session_dir.exists():
+    session_dir = _resolve_within(base_dir, session_id)
+    if not session_dir.is_dir():
         raise FileNotFoundError(f"Session '{session_id}' not found under {base_dir}")
     return session_dir
+
+
+def resolve_artifact_path(session_dir: Path, subdir: str, name: str) -> Path:
+    """Resolve an artifact file inside a session subdirectory, rejecting path traversal."""
+    return _resolve_within(session_dir / subdir, name)
 
 
 __all__ = [
@@ -161,5 +175,6 @@ __all__ = [
     "slugify_session_name",
     "find_manifests",
     "resolve_session_path",
+    "resolve_artifact_path",
     "DEFAULT_SESSIONS_DIR",
 ]

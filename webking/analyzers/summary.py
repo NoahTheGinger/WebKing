@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import textwrap
 from dataclasses import dataclass
 from typing import Any
 
@@ -41,18 +40,18 @@ def build_session_summary(
             f"  - Recipe '{step.get('recipe')}': {step.get('status')} ({step.get('message')})"
         )
 
-    summary_text = textwrap.dedent(
-        f"""
-        Target URL: {manifest.target_url}
-        Session ID: {manifest.session_id}
-
-        Artifacts captured:
-        {chr(10).join(bullet_lines)}
-
-        Recipe execution:
-        {(chr(10).join(recipe_lines) if recipe_lines else '  - No recipe executed')}
-        """
-    ).strip()
+    summary_text = "\n".join(
+        [
+            f"Target URL: {manifest.target_url}",
+            f"Session ID: {manifest.session_id}",
+            "",
+            "Artifacts captured:",
+            *bullet_lines,
+            "",
+            "Recipe execution:",
+            *(recipe_lines or ["  - No recipe executed"]),
+        ]
+    )
 
     if manifest.summary:
         summary_text += f"\n\nUser Notes:\n{manifest.summary}"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from webking.artifacts import (
@@ -26,6 +27,8 @@ from webking.artifacts import (
     save_manifest,
     slugify_session_name,
 )
+
+logger = logging.getLogger(__name__)
 
 CHARACTER_LIMIT = 25_000
 
@@ -92,7 +95,8 @@ class SessionConfig(BaseModel):
     browser: BrowserLaunchOptions = Field(default_factory=BrowserLaunchOptions)
     notes: str | None = Field(default=None, description="Optional free-form notes stored in manifest.")
 
-    @validator("cookies")
+    @field_validator("cookies")
+    @classmethod
     def validate_cookies(cls, value: Any) -> Any:
         if value is None:
             return value
@@ -113,10 +117,15 @@ class SessionResult:
 async def _attach_network_listeners(
     page: Page,
     capture_scripts: bool,
-) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Attach listeners to capture network requests & script bodies."""
+) -> tuple[list[dict[str, Any]], dict[str, str], set[asyncio.Task]]:
+    """Attach listeners to capture network requests & script bodies.
+
+    Returns the log, the script bodies, and the set of in-flight handler tasks, which the
+    caller should await before reading the log.
+    """
     network_log: list[dict[str, Any]] = []
     script_payloads: dict[str, str] = {}
+    pending: set[asyncio.Task] = set()
 
     async def handle_request_finished(request) -> None:
         try:
@@ -131,7 +140,7 @@ async def _attach_network_listeners(
                 "post_data": request.post_data,
                 "resource_type": request.resource_type,
                 "status": response.status,
-                "status_text": response.status_text(),
+                "status_text": response.status_text,
                 "response_headers": await response.all_headers(),
                 "request_timing": request.timing,
             }
@@ -145,7 +154,7 @@ async def _attach_network_listeners(
                         if total_length > CHARACTER_LIMIT:
                             text = (
                                 text[:CHARACTER_LIMIT]
-                                + f"\\n/* truncated {total_length - CHARACTER_LIMIT} chars */"
+                                + f"\n/* truncated {total_length - CHARACTER_LIMIT} chars */"
                             )
                         script_payloads[request.url] = text
                         entry["captured_script"] = True
@@ -154,10 +163,16 @@ async def _attach_network_listeners(
 
             network_log.append(entry)
         except Exception:  # pragma: no cover - best effort capture
-            return
+            # One failed request shouldn't abort the session, but don't hide it either
+            logger.warning("Could not record request %s", request.url, exc_info=True)
 
-    page.on("requestfinished", lambda request: asyncio.create_task(handle_request_finished(request)))
-    return network_log, script_payloads
+    def on_request_finished(request) -> None:
+        task = asyncio.create_task(handle_request_finished(request))
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+
+    page.on("requestfinished", on_request_finished)
+    return network_log, script_payloads, pending
 
 
 async def _capture_storage(context: BrowserContext) -> dict[str, Any]:
@@ -231,8 +246,9 @@ class SessionManager:
 
             network_log: list[dict[str, Any]] = []
             script_payloads: dict[str, str] = {}
+            pending_requests: set[asyncio.Task] = set()
             if config.capture.capture_network:
-                network_log, script_payloads = await _attach_network_listeners(
+                network_log, script_payloads, pending_requests = await _attach_network_listeners(
                     page, capture_scripts=config.capture.capture_scripts
                 )
 
@@ -241,11 +257,16 @@ class SessionManager:
                 stop=stop_after_attempt(3),
                 wait=wait_fixed(3),
                 retry=retry_if_exception_type(Exception),
+                reraise=True,
             ):
                 with attempt:
                     await page.goto(str(config.target_url), wait_until="networkidle")
 
             recipe_steps = await _run_recipe(page, config.recipe)
+
+            # Let in-flight response handlers finish so the log is complete
+            if pending_requests:
+                await asyncio.gather(*pending_requests, return_exceptions=True)
 
             dom_snapshot: str | None = None
             if config.capture.capture_dom:

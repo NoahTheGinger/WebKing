@@ -7,6 +7,7 @@ import textwrap
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,6 +19,7 @@ from webking.artifacts import (
     SessionManifest,
     find_manifests,
     load_manifest,
+    resolve_artifact_path,
     resolve_session_path,
 )
 from webking.browser import SessionConfig, SessionManager
@@ -142,7 +144,7 @@ def _load_script_list(manifest: SessionManifest) -> list[ArtifactMeta]:
     name="webking_launch_session",
     annotations={
         "title": "Launch Capture Session",
-        "readOnlyHint": True,
+        "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": False,
         "openWorldHint": True,
@@ -165,7 +167,8 @@ async def webking_launch_session(params: LaunchSessionInput, ctx: Context) -> st
         str: JSON payload containing the session ID and capture summary, truncated if necessary.
     """
     manager = SessionManager(base_dir=DEFAULT_SESSIONS_DIR)
-    await ctx.log_info("Launching session", params.session.model_dump())
+    # Only log the target; the config may contain cookies and auth headers
+    await ctx.info(f"Launching session for {params.session.target_url}")
     result = await manager.run_session(params.session)
 
     summary = {
@@ -313,7 +316,7 @@ async def webking_get_network_insights(params: NetworkInsightsInput) -> str:
 async def webking_get_dom_snapshot(params: DomSnapshotInput) -> str:
     """Load a stored DOM snapshot."""
     session_dir = resolve_session_path(params.session_id, DEFAULT_SESSIONS_DIR)
-    snapshot_path = session_dir / "dom" / params.snapshot_name
+    snapshot_path = resolve_artifact_path(session_dir, "dom", params.snapshot_name)
     if not snapshot_path.exists():
         raise FileNotFoundError(f"Snapshot '{params.snapshot_name}' not found for session.")
 
@@ -346,7 +349,7 @@ async def webking_get_dom_snapshot(params: DomSnapshotInput) -> str:
 async def webking_get_script_bundle(params: ScriptContentInput) -> str:
     """Return the contents of a stored JavaScript bundle captured during a session."""
     session_dir = resolve_session_path(params.session_id, DEFAULT_SESSIONS_DIR)
-    script_path = session_dir / "scripts" / params.script_name
+    script_path = resolve_artifact_path(session_dir, "scripts", params.script_name)
     if not script_path.exists():
         raise FileNotFoundError(f"Script '{params.script_name}' not found.")
     content = load_text(script_path)
@@ -396,58 +399,63 @@ async def webking_generate_userscript_stub(params: UserscriptStubInput) -> str:
 
     network_hook_block = ""
     if params.include_network_hooks and key_endpoints:
-        hook_lines = [
-            "// Example fetch hook capturing request bodies",
-            "const originalFetch = window.fetch;",
-            "window.fetch = async (...args) => {",
-            "  const response = await originalFetch(...args);",
-            "  console.log('[WebKing] fetch call', args[0]);",
-            "  return response;",
-            "};",
-        ]
-        network_hook_block = "\n  ".join(hook_lines)
+        network_hook_block = "\n".join(
+            [
+                "  // Example fetch hook that logs every request",
+                "  const originalFetch = window.fetch;",
+                "  window.fetch = async (...args) => {",
+                "    console.log('[WebKing] fetch call', args[0]);",
+                "    return originalFetch(...args);",
+                "  };",
+            ]
+        )
 
     storage_hook_block = ""
     if params.include_storage and manifest.artifact_index.storage:
-        storage_hook_block = textwrap.dedent(
-            """
-            // Example helper to inspect storage snapshot captured by WebKing.
-            function logCapturedStorage() {
-              console.table(WEBKING_STORAGE_STATE.cookies || []);
-              console.log('Local Storage:', WEBKING_STORAGE_STATE.origins?.[0]?.localStorage);
-            }
-            """
-        ).strip()
+        storage_hook_block = "\n".join(
+            [
+                "  // Example helper to inspect the storage available to the page.",
+                "  function logPageStorage() {",
+                "    console.table(Object.entries(localStorage));",
+                "    console.table(Object.entries(sessionStorage));",
+                "    console.log('Cookies:', document.cookie);",
+                "  }",
+            ]
+        )
 
-    header_block = textwrap.dedent(
-        f"""
-        // ==UserScript==
-        // @name         WebKing Stub - {manifest.session_id}
-        // @namespace    https://webking.local/
-        // @match        {manifest.target_url}
-        // @grant        none
-        // ==/UserScript==
+    def as_js(value: Any) -> str:
+        return textwrap.indent(json.dumps(value, indent=2), "  ").lstrip()
 
-        (function() {{
-          'use strict';
+    target = urlparse(manifest.target_url)
+    header_block = "\n".join(
+        [
+            "// ==UserScript==",
+            f"// @name         WebKing Stub - {manifest.session_id}",
+            "// @namespace    https://webking.local/",
+            f"// @match        {target.scheme}://{target.netloc}/*",
+            "// @grant        none",
+            "// ==/UserScript==",
+            "",
+            "(function() {",
+            "  'use strict';",
+            "",
+            f"  const WEBKING_METADATA = {as_js(script_comment_lines)};",
+            f"  const KEY_ENDPOINTS = {as_js(key_endpoints)};",
+        ]
+    )
 
-          const WEBKING_METADATA = {json.dumps(script_comment_lines, indent=2)};
-          const KEY_ENDPOINTS = {json.dumps(key_endpoints, indent=2)};
-        """
-    ).strip()
-
-    footer_block = textwrap.dedent(
-        """
-          console.info('[WebKing] Userscript stub loaded', WEBKING_METADATA);
-        })();
-        """
-    ).strip()
+    footer_block = "\n".join(
+        [
+            "  console.info('[WebKing] Userscript stub loaded', WEBKING_METADATA);",
+            "})();",
+        ]
+    )
 
     script_sections = [header_block]
     if network_hook_block:
-        script_sections.append("  " + network_hook_block)
+        script_sections.append(network_hook_block)
     if storage_hook_block:
-        script_sections.append("  " + storage_hook_block)
+        script_sections.append(storage_hook_block)
     script_sections.append(footer_block)
 
     script_body = "\n\n".join(script_sections)
